@@ -124,8 +124,11 @@ def _ganzhi_day(year, month, day):
     return LIUSHIIAZI[idx]
 
 def _ganzhi_hour(day_gan, hour):
-    shichen = (hour + 1) // 2
-    if shichen == 0: shichen = 12
+    # hour为0-23整数小时。子时23-1→索引1, 丑1-3→2, ... 酉17-19→10, 戌19-21→11, 亥21-23→12
+    if hour == 23:
+        shichen = 1  # 晚子时(23:00后)归子
+    else:
+        shichen = (hour + 1) // 2 + 1  # 15→9申, 17→10酉, 12→7午
     zhi = DIZHI[shichen - 1]
     start_map = {"甲":"甲","己":"甲", "乙":"丙","庚":"丙",
                  "丙":"戊","辛":"戊", "丁":"庚","壬":"庚", "戊":"壬","癸":"壬"}
@@ -313,9 +316,15 @@ def qimen_pai_pan_dict(dt_str):
             shigan_gong = g
             break
 
+    # 日干落宫 (日干为甲则用其旬首遁干)
+    rigan_raw = ri[0]
+    rigan_actual = rigan_raw
+    if rigan_raw == "甲":
+        ri_xunshou = find_xunshou(ri)
+        rigan_actual = LIUJIA_DUN[ri_xunshou]
     rigan_gong = None
     for g, gan in dp.items():
-        if gan == ri[0]:
+        if gan == rigan_actual:
             rigan_gong = g
             break
 
@@ -331,6 +340,8 @@ def qimen_pai_pan_dict(dt_str):
 
     ke = {"水":"火","火":"金","金":"木","木":"土","土":"水"}
     sheng = {"水":"木","木":"火","火":"土","土":"金","金":"水"}
+    if rigan_gong is None or shigan_gong is None:
+        return {"error": f"日干或时干未在地盘中找到 (日干={ri[0]}, 时干={shigan_actual})", "datetime": dt_str}
     rw = WUXING[rigan_gong]
     sw = WUXING[shigan_gong]
 
