@@ -83,6 +83,38 @@ FUTOU_RULE = {
     "辰":"下元","戌":"下元","丑":"下元","未":"下元",
 }
 
+# 节气 -> (遁式, 三元局数), 与 JIEQI_YANG/JIEQI_YIN 一致 (集中便于精确节气查询)
+QI_JU = {
+    "冬至":("阳遁",[1,7,4]), "小寒":("阳遁",[2,8,5]), "大寒":("阳遁",[3,9,6]),
+    "立春":("阳遁",[8,5,2]), "雨水":("阳遁",[9,6,3]), "惊蛰":("阳遁",[1,7,4]),
+    "春分":("阳遁",[3,9,6]), "清明":("阳遁",[4,1,7]), "谷雨":("阳遁",[5,2,8]),
+    "立夏":("阳遁",[4,1,7]), "小满":("阳遁",[5,2,8]), "芒种":("阳遁",[6,3,9]),
+    "夏至":("阴遁",[9,3,6]), "小暑":("阴遁",[8,2,5]), "大暑":("阴遁",[7,1,4]),
+    "立秋":("阴遁",[2,5,8]), "处暑":("阴遁",[1,4,7]), "白露":("阴遁",[9,3,6]),
+    "秋分":("阴遁",[7,1,4]), "寒露":("阴遁",[6,9,3]), "霜降":("阴遁",[5,8,2]),
+    "立冬":("阴遁",[6,9,3]), "小雪":("阴遁",[5,8,2]), "大雪":("阴遁",[4,7,1]),
+}
+
+def _current_jieqi(year, month, day, hour, minute):
+    """查询时刻所处的节气(精确到分): 用 lunar_python 节气表.
+    失败(未安装/越界)返回 None, 由调用方回退日期区间表"""
+    try:
+        from lunar_python import Solar
+        best = None
+        for d_offset in (0, -1):
+            s = Solar.fromYmdHms(year, month, day, hour, minute, 0).next(d_offset)
+            for name, solar in s.getLunar().getJieQiTable().items():
+                if name not in QI_JU:
+                    continue
+                if (solar.getYear(), solar.getMonth(), solar.getDay(),
+                        solar.getHour(), solar.getMinute()) <= (year, month, day, hour, minute):
+                    key = solar.toYmdHms()
+                    if best is None or key > best[0]:
+                        best = (key, name)
+        return best[1] if best else None
+    except ImportError:
+        return None
+
 # ============================================================
 # 四柱推算 (简化, 1900-2100)
 # ============================================================
@@ -95,14 +127,32 @@ def _ganzhi_year(year):
     idx = (year - base) % 60
     return TIANGAN[idx % 10] + DIZHI[idx % 12]
 
-def _ganzhi_month(year, month):
-    nian_gan = _ganzhi_year(year)[0]
-    yue_gan_start = {"甲":"丙","己":"丙", "乙":"戊","庚":"戊",
-                     "丙":"庚","辛":"庚", "丁":"壬","壬":"壬", "戊":"甲","癸":"甲"}
-    start = TIANGAN.index(yue_gan_start[nian_gan])
-    gan = TIANGAN[(start + month - 1) % 10]
-    zhi = DIZHI[(month + 1) % 12]
+# 节气 -> 月支 (月柱以节为界切换, 中气不改月; 立春起寅)
+QI_TO_MONTH_ZHI = {
+    "立春":"寅","雨水":"寅","惊蛰":"卯","春分":"卯","清明":"辰","谷雨":"辰",
+    "立夏":"巳","小满":"巳","芒种":"午","夏至":"午","小暑":"未","大暑":"未",
+    "立秋":"申","处暑":"申","白露":"酉","秋分":"酉","寒露":"戌","霜降":"戌",
+    "立冬":"亥","小雪":"亥","大雪":"子","冬至":"子","小寒":"丑","大寒":"丑",
+}
+# 五虎遁: 年干 -> 寅月起干
+YUE_GAN_START = {"甲":"丙","己":"丙","乙":"戊","庚":"戊",
+                 "丙":"庚","辛":"庚","丁":"壬","壬":"壬","戊":"甲","癸":"甲"}
+
+def _ganzhi_month(nian_gan, qi):
+    """月柱: 由节气定月支, 五虎遁定月干 (月柱随节气切换, 不随公历月)"""
+    zhi = QI_TO_MONTH_ZHI[qi]
+    offset = (DIZHI.index(zhi) - DIZHI.index("寅")) % 12
+    base = TIANGAN.index(YUE_GAN_START[nian_gan])
+    gan = TIANGAN[(base + offset) % 10]
     return gan + zhi
+
+def _ganzhi_year_exact(year, month, day, hour, minute):
+    """年柱: 以立春换年. 优先 lunar_python 精确版, 失败回退公历年"""
+    try:
+        from lunar_python import Solar
+        return Solar.fromYmdHms(year, month, day, hour, minute, 0).getLunar().getYearInGanZhiExact()
+    except Exception:
+        return _ganzhi_year(year)
 
 def _days_in_year(y):
     return 366 if (y % 4 == 0 and y % 100 != 0) or (y % 400 == 0) else 365
@@ -146,8 +196,9 @@ def find_xunshou(shigan_zhu):
         idx -= 1
     return LIUSHIIAZI[idx]
 
-def get_jushu(year, month, day):
-    """根据公历日期确定用局, 返回 (局数, 节气, 元, 符头, 遁式)"""
+def get_jushu(year, month, day, hour=12, minute=0):
+    """根据公历日期+时刻确定用局, 返回 (局数, 节气, 元, 符头, 遁式).
+    节气判定优先用精确节气时刻(_current_jieqi), 失败回退日期区间表"""
     ri_zhu = _ganzhi_day(year, month, day)
     idx = LIUSHIIAZI.index(ri_zhu)
     futou = ri_zhu
@@ -160,7 +211,15 @@ def get_jushu(year, month, day):
         idx -= 1
     dz = futou[1]
     yuan = FUTOU_RULE[dz]
+    yuan_idx = {"上元":0, "中元":1, "下元":2}[yuan]
 
+    # 精确节气(到分), 成功则直接定局
+    qi = _current_jieqi(year, month, day, hour, minute)
+    if qi is not None:
+        dun, ju = QI_JU[qi]
+        return ju[yuan_idx], qi, yuan, futou, dun
+
+    # 回退: 日期区间表
     # 先查阳遁
     for (m, (d1, d2)), (qi, ju) in JIEQI_YANG.items():
         if month == m and d1 <= day <= d2:
@@ -287,14 +346,14 @@ def qimen_pai_pan_dict(dt_str):
     dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M")
     year, month, day, hour = dt.year, dt.month, dt.day, dt.hour
 
-    nian = _ganzhi_year(year)
-    yue = _ganzhi_month(year, month)
+    nian = _ganzhi_year_exact(year, month, day, hour, dt.minute)
     ri = _ganzhi_day(year, month, day)
     shi = _ganzhi_hour(ri[0], hour)
 
-    jushu, qi, yuan, futou, dun_type = get_jushu(year, month, day)
+    jushu, qi, yuan, futou, dun_type = get_jushu(year, month, day, hour, dt.minute)
     if jushu is None:
         return {"error": "无法确定用局", "datetime": dt_str}
+    yue = _ganzhi_month(nian[0], qi)
 
     yin_dun = (dun_type == "阴遁")
     dp = dipan_yin(jushu) if yin_dun else dipan_yang(jushu)
